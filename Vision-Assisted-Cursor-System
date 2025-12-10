@@ -1,0 +1,146 @@
+# gaze_model.py 
+# Handles the gaze mapping using Ridge regression and persistence with joblib.
+
+import numpy as np
+import joblib
+from sklearn.linear_model import Ridge
+
+class GazeModel:
+    
+    def __init__(self):
+        self.rx = None  
+        self.ry = None  
+
+    def calibrate(self, features, screen_coords):
+        
+        X = np.array(features)
+        Yx = np.array(screen_coords)[:, 0]
+        Yy = np.array(screen_coords)[:, 1]
+
+        print("Fitting Ridge regression models...")
+        self.rx = Ridge(alpha=1.0)
+        self.ry = Ridge(alpha=1.0)
+        
+        self.rx.fit(X, Yx)
+        self.ry.fit(X, Yy)
+        print("Models calibrated successfully.")
+
+    def predict(self, feature_vector):
+        
+        if self.rx is None or self.ry is None:
+            print("Model not trained. Please run calibration first.")
+            return (0, 0)
+        
+        f = np.array(feature_vector).reshape(1, -1)
+        x = float(self.rx.predict(f)[0])
+        y = float(self.ry.predict(f)[0])
+        
+        return (x, y)
+    
+    def save(self, file_path):
+        
+        joblib.dump((self.rx, self.ry), file_path)
+        print(f"Model saved to {file_path}")
+
+    def load(self, file_path):
+        
+        try:
+            self.rx, self.ry = joblib.load(file_path)
+            print(f"Model loaded from {file_path}")
+            return True
+        except FileNotFoundError:
+            print(f"Model file not found at {file_path}.")
+            return False
+        except Exception as e:
+            print(f"Failed to load model: {e}")
+            return False
+
+
+
+
+
+
+
+
+
+# calibrate.py
+# Script for the 9-point calibration routine.
+
+import cv2
+import numpy as np
+import time
+from gaze_model import GazeModel
+from face_landmarks import FaceLandmarks
+from features import get_eye_features
+from utils import load_config
+import os
+
+def run_calibration(landmarks_detector, config, frame_placeholder, status_placeholder, cam):
+   
+    features_list = []
+    coords_list = []
+    
+    screen_width, screen_height = 1920, 1080 
+
+   
+    points = [
+        (int(screen_width * 0.1), int(screen_height * 0.1)),
+        (int(screen_width * 0.5), int(screen_height * 0.1)),
+        (int(screen_width * 0.9), int(screen_height * 0.1)),
+        (int(screen_width * 0.1), int(screen_height * 0.5)),
+        (int(screen_width * 0.5), int(screen_height * 0.5)),
+        (int(screen_width * 0.9), int(screen_height * 0.5)),
+        (int(screen_width * 0.1), int(screen_height * 0.9)),
+        (int(screen_width * 0.5), int(screen_height * 0.9)),
+        (int(screen_width * 0.9), int(screen_height * 0.9)),
+    ]
+    
+   
+    import random
+    random.shuffle(points)
+
+    status_placeholder.info("Starting 9-point calibration. Look at the red dot as it moves.")
+    time.sleep(2)
+
+    for i, point in enumerate(points):
+        samples = []
+        for j in range(config['calibration_frame_count'] * 2): 
+            frame = cam.read()
+            if frame is None:
+                status_placeholder.error("Webcam not available. Please try again.")
+                return None, None
+            
+            # Display calibration point within Streamlit
+            calib_frame = frame.copy()
+            cv2.circle(calib_frame, (int(point[0] * config['webcam_width'] / screen_width), 
+                                      int(point[1] * config['webcam_height'] / screen_height)), 
+                       20, (0, 0, 255), -1)
+            cv2.putText(calib_frame, f"Point {i+1}/{len(points)}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            frame_placeholder.image(calib_frame, channels="BGR")
+
+            # Only sample after a short delay
+            if j >= config['calibration_frame_count']:
+                face_data = landmarks_detector.process_frame(frame)
+                if face_data:
+                    features = get_eye_features(
+                        face_data['landmarks'],
+                        config['webcam_width'],
+                        config['webcam_height']
+                    )
+                    if features and features['vector'].shape[0] > 0:
+                        samples.append(features['vector'])
+        
+        if len(samples) > 0:
+            avg_feature_vector = np.mean(samples, axis=0)
+            features_list.append(avg_feature_vector)
+            coords_list.append(point)
+    
+    if len(features_list) < len(points):
+        status_placeholder.error("Calibration failed. Please ensure your face is visible and in good lighting.")
+        return None, None
+    
+    status_placeholder.success(f"Calibration successful with {len(features_list)} samples.")
+    return np.array(features_list), np.array(coords_list)
+
+
+
