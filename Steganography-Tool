@@ -1,93 +1,160 @@
-# main.py
+# image_steganography.py
+# Handles embedding and extracting one image into/from another image.
 
+import struct
+import numpy as np 
+from PIL import Image 
+from utils import load_image, save_image, bytes_to_binary, binary_to_bytes, get_pixel_data_capacity, embed_data_into_image, extract_data_from_image
 
-import argparse
-import os
-from text_steganography import embed_text, extract_text
-from image_steganography import embed_image, extract_image
-from utils import save_image 
+# Metadata for secret image: width, height
+IMAGE_METADATA_BITS = 16 * 2
 
-def main():
+# The number of bits used to store the length of the hidden image data.
+LENGTH_PREFIX_BITS = 32 
+
+def embed_image(cover_image_path, secret_image_path, output_path):
+    """
+    Embeds a secret image into a cover image using LSB steganography.
+    The secret image's dimensions and data length are prepended as binary headers.
+    Returns True on success, False on failure.
+    """
+    cover_img = load_image(cover_image_path)
+    if not cover_img:
+        print(f"ERROR: embed_image: Failed to load cover image at {cover_image_path}")
+        return False 
+
+    secret_img = load_image(secret_image_path)
+    if not secret_img:
+        print(f"ERROR: embed_image: Failed to load secret image at {secret_image_path}")
+        return False 
+
+    # Convert secret image pixel data (RGB channels) to a continuous binary string.
+    secret_img_pixels = secret_img.load()
+    secret_img_binary_data = []
+    for y in range(secret_img.height):
+        for x in range(secret_img.width):
+            r, g, b = secret_img_pixels[x, y]
+            secret_img_binary_data.append(format(r, '08b'))
+            secret_img_binary_data.append(format(g, '08b'))
+            secret_img_binary_data.append(format(b, '08b'))
+    secret_img_binary = "".join(secret_img_binary_data)
+
+    # Prepare metadata: width and height of the secret image.
+    metadata_bytes = struct.pack('>HH', secret_img.width, secret_img.height)
+    metadata_binary = bytes_to_binary(metadata_bytes)
+
+    # Prepend the length of the secret image binary data as a 32-bit binary string
+    secret_img_len_bits = len(secret_img_binary)
+    length_binary = format(secret_img_len_bits, f'0{LENGTH_PREFIX_BITS}b') 
+
+    # Combine all binary data: length prefix + image metadata + actual image pixel data
+    full_data_binary = length_binary + metadata_binary + secret_img_binary
+
+    # Get the maximum capacity of the cover image for hidden data
+    capacity = get_pixel_data_capacity(cover_img)
+
+    # Check if the total data fits within the cover image's capacity
+    if len(full_data_binary) > capacity:
+        print(f"Error: Secret image is too large for the cover image. Required bits: {len(full_data_binary)}, Available bits: {capacity}")
+        return False 
+
+    # Embed the combined binary data into the cover image
+    stego_img = embed_data_into_image(cover_img, full_data_binary)
     
-    parser = argparse.ArgumentParser(description="Perform text or image steganography.")
-    
-    # Subparsers for different steganography types (text, image)
-    subparsers = parser.add_subparsers(dest='type', help='Type of steganography (text or image)')
+    # Check if stego_img is valid before attempting to save
+    if not stego_img:
+        print("ERROR: embed_image: stego_img is None after embedding data.")
+        return False 
 
-    # Text Steganography Subparser
-    text_parser = subparsers.add_parser('text', help='Text steganography operations')
-    text_subparsers = text_parser.add_subparsers(dest='operation', help='Text steganography operation (embed or extract)')
-
-    # Text Embed Parser
-    text_embed_parser = text_subparsers.add_parser('embed', help='Embed text into an image')
-    text_embed_parser.add_argument('--image', required=True, help='Path to the cover image file.')
-    text_embed_parser.add_argument('--text', required=True, help='Text to hide.')
-    text_embed_parser.add_argument('--output', required=True, help='Path to save the output stego image.')
-
-    # Text Extract Parser
-    text_extract_parser = text_subparsers.add_parser('extract', help='Extract text from a stego image')
-    text_extract_parser.add_argument('--image', required=True, help='Path to the stego image file.')
-
-    # Image Steganography Subparser
-    image_parser = subparsers.add_parser('image', help='Image steganography operations')
-    image_subparsers = image_parser.add_subparsers(dest='operation', help='Image steganography operation (embed or extract)')
-
-    # Image Embed Parser
-    image_embed_parser = image_subparsers.add_parser('embed', help='Embed a secret image into a cover image')
-    image_embed_parser.add_argument('--cover-image', required=True, help='Path to the cover image file.')
-    image_embed_parser.add_argument('--secret-image', required=True, help='Path to the secret image file to hide.')
-    image_embed_parser.add_argument('--output', required=True, help='Path to save the output stego image.')
-
-    # Image Extract Parser
-    image_extract_parser = image_subparsers.add_parser('extract', help='Extract a secret image from a stego image')
-    image_extract_parser.add_argument('--image', required=True, help='Path to the stego image file.')
-    image_extract_parser.add_argument('--output', required=True, help='Path to save the extracted secret image.')
-
-    args = parser.parse_args()
-
-    # Execute Operations
-    if args.type == 'text':
-        if args.operation == 'embed':
-            print(f"Embedding text '{args.text}' into '{args.image}'...")
-            success = embed_text(args.image, args.text, args.output)
-            if success:
-                print(f"Text embedded successfully. Stego image saved to: {args.output}")
-            else:
-                print("Text embedding failed. Check error messages above.")
-        elif args.operation == 'extract':
-            print(f"Extracting text from '{args.image}'...")
-            extracted_text = extract_text(args.image)
-            if extracted_text is not None: # Check for None which signifies an error
-                if extracted_text == "": # Check for empty string which means no text found
-                    print("No hidden text found.")
-                else:
-                    print("Extracted Text:")
-                    print(extracted_text)
-            else:
-                print("Text extraction failed. Check error messages above.")
-        else:
-            text_parser.print_help() # If no operation specified for text
-
-    elif args.type == 'image':
-        if args.operation == 'embed':
-            print(f"Embedding '{args.secret_image}' into '{args.cover_image}'...")
-            success = embed_image(args.cover_image, args.secret_image, args.output)
-            if success:
-                print(f"Image embedded successfully. Stego image saved to: {args.output}")
-            else:
-                print("Image embedding failed. Check error messages above.")
-        elif args.operation == 'extract':
-            print(f"Extracting secret image from '{args.image}'...")
-            success = extract_image(args.image, args.output)
-            if success:
-                print(f"Secret image extracted successfully. Saved to: {args.output}")
-            else:
-                print("Image extraction failed. Check error messages above.")
-        else:
-            image_parser.print_help() # If no operation specified for image
-
+    # Save the resulting stego image. save_image also returns True/False now.
+    if save_image(stego_img, output_path):
+        return True
     else:
-        parser.print_help() # If no type specified (text or image)
+        print(f"ERROR: embed_image: Failed to save stego image to {output_path}")
+        return False 
 
-if __name__ == '__main__':
-    main()
+def extract_image(stego_image_path, output_image_path):
+    """
+    Extracts a secret image from a stego image.
+    It first reads the data length and image dimensions from the stego image's LSBs.
+    Returns True on success, False on failure.
+    """
+    stego_img = load_image(stego_image_path)
+    if not stego_img:
+        print(f"ERROR: extract_image: Failed to load stego image at {stego_image_path}")
+        return False 
+
+    # First, extract the length prefix (32 bits) of the secret image's data
+    length_binary_str = extract_data_from_image(stego_img, LENGTH_PREFIX_BITS)
+    if not length_binary_str:
+        print("Error: Could not extract length prefix. Image might not contain hidden image.")
+        return False 
+
+    try:
+        secret_img_len_bits = int(length_binary_str, 2)
+    except ValueError:
+        print("Error: Invalid length prefix extracted. Image might not contain hidden image.")
+        return False 
+
+    # If the extracted length is zero, no secret image was embedded
+    if secret_img_len_bits == 0:
+        print("No secret image data found.")
+        return False 
+
+    # Calculate the total bits to extract: length prefix + image metadata + actual image data
+    total_bits_to_extract = LENGTH_PREFIX_BITS + IMAGE_METADATA_BITS + secret_img_len_bits
+
+    # Extract all the combined binary data from the stego image
+    full_extracted_binary = extract_data_from_image(stego_img, total_bits_to_extract)
+
+    # Check if the extracted data length matches the expected total length
+    if len(full_extracted_binary) < total_bits_to_extract:
+        print(f"Error: Not enough data extracted. Image might be truncated or corrupted. Expected {total_bits_to_extract}, got {len(full_extracted_binary)}")
+        return False 
+
+    # Separate the metadata binary string from the actual image data binary string
+    metadata_binary_str = full_extracted_binary[LENGTH_PREFIX_BITS : LENGTH_PREFIX_BITS + IMAGE_METADATA_BITS]
+    extracted_secret_img_binary = full_extracted_binary[LENGTH_PREFIX_BITS + IMAGE_METADATA_BITS:]
+
+    try:
+        # Unpack the metadata (width and height) from its binary string
+        metadata_bytes = binary_to_bytes(metadata_binary_str)
+        secret_img_width, secret_img_height = struct.unpack('>HH', metadata_bytes)
+
+        # Validate extracted dimensions
+        if not (secret_img_width > 0 and secret_img_height > 0):
+            print("Error: Extracted image dimensions are invalid.")
+            return False 
+
+        # Reconstruct the secret image from its binary pixel data
+        extracted_pixels_data = bytearray()
+        data_index = 0
+        
+        # Loop through the binary data, taking 8 bits for R, 8 for G, 8 for B
+        # and converting them back to integer pixel values.
+        for _ in range(secret_img_width * secret_img_height):
+            r_binary = extracted_secret_img_binary[data_index : data_index + 8]
+            g_binary = extracted_secret_img_binary[data_index + 8 : data_index + 16]
+            b_binary = extracted_secret_img_binary[data_index + 16 : data_index + 24]
+
+            r = int(r_binary, 2)
+            g = int(g_binary, 2)
+            b = int(b_binary, 2)
+
+            extracted_pixels_data.extend([r, g, b]) 
+
+            data_index += 24 # Move to the next pixel's data (3 channels * 8 bits/channel)
+
+        # Create a new Pillow Image object from the reconstructed pixel data
+        extracted_img = Image.frombytes("RGB", (secret_img_width, secret_img_height), bytes(extracted_pixels_data))
+        
+        # Save the extracted image to the specified output path
+        if save_image(extracted_img, output_image_path):
+            return True 
+        else:
+            print(f"ERROR: extract_image: Failed to save extracted image to {output_image_path}")
+            return False
+
+    except Exception as e:
+        print(f"Error processing extracted image: {e}")
+        return False 
